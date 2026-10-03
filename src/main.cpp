@@ -1,6 +1,7 @@
 #include <memory>
 #include <sstream>
 #include <string>
+#include <string_view>
 
 #include <hyprland/src/config/ConfigManager.hpp>
 #include <hyprland/src/config/values/types/ColorValue.hpp>
@@ -18,13 +19,16 @@ extern "C" {
 #include "overview_controller.hpp"
 #include "stage_controller.hpp"
 
+// The plugin build checks that this Hyprland commit is present in the DSO.
+__attribute__((used)) static const char kHyprlandCommit[] = GIT_COMMIT_HASH;
+
 inline HANDLE g_pluginHandle = nullptr;
 inline std::unique_ptr<hymission::OverviewController> g_overviewController;
 inline std::unique_ptr<hymission::StageController> g_stageController;
-inline SP<SHyprCtlCommand> g_stageStateCommand;
-inline SP<SHyprCtlCommand> g_overviewStateCommand;
-inline SP<SHyprCtlCommand> g_rawWindowRenderCommand;
-inline SP<SHyprCtlCommand> g_captureInputCommand;
+inline SP<IPC::Socket1::SCommand> g_stageStateCommand;
+inline SP<IPC::Socket1::SCommand> g_overviewStateCommand;
+inline SP<IPC::Socket1::SCommand> g_rawWindowRenderCommand;
+inline SP<IPC::Socket1::SCommand> g_captureInputCommand;
 
 namespace {
 bool addConfigValue(SP<Config::Values::IValue> value) {
@@ -77,23 +81,32 @@ SDispatchResult dispatchDebugCurrentLayout(const std::string&) {
     return g_overviewController ? g_overviewController->debugCurrentLayout() : SDispatchResult{.success = false, .error = "overview controller unavailable"};
 }
 
-std::string hyprctlOverviewState(eHyprCtlOutputFormat, std::string) {
+std::string hyprctlCommandArgs(const IPC::Socket1::SRequest& request, std::string_view name) {
+    std::string_view command = request.command;
+    if (command.starts_with(name))
+        command.remove_prefix(name.size());
+    while (!command.empty() && command.front() == ' ')
+        command.remove_prefix(1);
+    return std::string{command};
+}
+
+IPC::Socket1::SResponse hyprctlOverviewState(const IPC::Socket1::SRequest&) {
     if (g_overviewController)
         return g_overviewController->overviewStateJson();
 
     return "{\"version\":1,\"active\":false,\"windows\":[]}\n";
 }
 
-std::string hyprctlRawWindowRender(eHyprCtlOutputFormat, std::string args) {
+IPC::Socket1::SResponse hyprctlRawWindowRender(const IPC::Socket1::SRequest& request) {
     if (g_overviewController)
-        return g_overviewController->handleRawWindowRenderCommand(args);
+        return g_overviewController->handleRawWindowRenderCommand(hyprctlCommandArgs(request, "hymission-raw-window-render"));
 
     return "error: overview controller unavailable\n";
 }
 
-std::string hyprctlCaptureInput(eHyprCtlOutputFormat, std::string args) {
+IPC::Socket1::SResponse hyprctlCaptureInput(const IPC::Socket1::SRequest& request) {
     if (g_overviewController)
-        return g_overviewController->handleCaptureInputCommand(args);
+        return g_overviewController->handleCaptureInputCommand(hyprctlCommandArgs(request, "hymission-capture-input"));
 
     return "error: overview controller unavailable\n";
 }
@@ -439,10 +452,12 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
         return g_overviewController && g_overviewController->suspendsStage();
     });
     g_stageController->initialize();
-    g_stageStateCommand = HyprlandAPI::registerHyprCtlCommand(g_pluginHandle, SHyprCtlCommand{
+    g_stageStateCommand = HyprlandAPI::registerHyprCtlCommand(g_pluginHandle, IPC::Socket1::SCommand{
         .name = "hymission-stage-state",
-        .exact = true,
-        .fn = [](eHyprCtlOutputFormat, std::string) { return g_stageController ? g_stageController->stateJson() : "{\"enabled\":false}\n"; },
+        .match = IPC::Socket1::COMMAND_MATCH_EXACT,
+        .handler = [](const IPC::Socket1::SRequest&) -> IPC::Socket1::SResponse {
+            return g_stageController ? g_stageController->stateJson() : "{\"enabled\":false}\n";
+        },
     });
 
     // Lua configs call the plugin-owned functions registered below directly.
@@ -462,28 +477,28 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
         registerDispatcher("hymission:debug_current_layout", dispatchDebugCurrentLayout);
     }
 
-    g_overviewStateCommand = HyprlandAPI::registerHyprCtlCommand(g_pluginHandle, SHyprCtlCommand{
+    g_overviewStateCommand = HyprlandAPI::registerHyprCtlCommand(g_pluginHandle, IPC::Socket1::SCommand{
         .name = "hymission-overview-state",
-        .exact = true,
-        .fn = hyprctlOverviewState,
+        .match = IPC::Socket1::COMMAND_MATCH_EXACT,
+        .handler = hyprctlOverviewState,
     });
     if (!g_overviewStateCommand)
         HyprlandAPI::addNotification(g_pluginHandle, "[hymission] failed to register hyprctl command hymission-overview-state",
                                      CHyprColor(1.0, 0.2, 0.2, 1.0), 5000);
 
-    g_rawWindowRenderCommand = HyprlandAPI::registerHyprCtlCommand(g_pluginHandle, SHyprCtlCommand{
+    g_rawWindowRenderCommand = HyprlandAPI::registerHyprCtlCommand(g_pluginHandle, IPC::Socket1::SCommand{
         .name = "hymission-raw-window-render",
-        .exact = false,
-        .fn = hyprctlRawWindowRender,
+        .match = IPC::Socket1::COMMAND_MATCH_PREFIX,
+        .handler = hyprctlRawWindowRender,
     });
     if (!g_rawWindowRenderCommand)
         HyprlandAPI::addNotification(g_pluginHandle, "[hymission] failed to register hyprctl command hymission-raw-window-render",
                                      CHyprColor(1.0, 0.2, 0.2, 1.0), 5000);
 
-    g_captureInputCommand = HyprlandAPI::registerHyprCtlCommand(g_pluginHandle, SHyprCtlCommand{
+    g_captureInputCommand = HyprlandAPI::registerHyprCtlCommand(g_pluginHandle, IPC::Socket1::SCommand{
         .name = "hymission-capture-input",
-        .exact = false,
-        .fn = hyprctlCaptureInput,
+        .match = IPC::Socket1::COMMAND_MATCH_PREFIX,
+        .handler = hyprctlCaptureInput,
     });
     if (!g_captureInputCommand)
         HyprlandAPI::addNotification(g_pluginHandle, "[hymission] failed to register hyprctl command hymission-capture-input",

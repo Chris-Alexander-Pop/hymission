@@ -20,7 +20,9 @@
 #include <hyprland/src/desktop/state/GlobalWindowController.hpp>
 #include <hyprland/src/desktop/state/WindowState.hpp>
 #include <hyprland/src/desktop/state/ViewHitTester.hpp>
-#include <hyprland/src/desktop/view/Window.hpp>
+#include <hyprland/src/desktop/view/window/Window.hpp>
+#include <hyprland/src/desktop/view/window/WindowPresentation.hpp>
+#include <hyprland/src/render/decorations/IHyprWindowDecoration.hpp>
 #include <hyprland/src/desktop/view/WLSurface.hpp>
 #include <hyprland/src/protocols/core/Compositor.hpp>
 #include <hyprland/src/event/EventBus.hpp>
@@ -298,16 +300,16 @@ struct StageController::Impl {
 
     static WORKSPACEID cardID(const Card& card) {
         if (const auto workspace = card.workspace.lock())
-            return workspace->m_id;
+            return workspaceNumericId(workspace);
         return card.syntheticId;
     }
 
     static PHLWORKSPACE ensureWorkspace(const PHLMONITOR& monitor, WORKSPACEID id) {
         if (!monitor || id <= 0)
             return nullptr;
-        if (const auto existing = State::workspaceState()->query().id(id).run())
+        if (const auto existing = findNumberedWorkspace(id))
             return existing;
-        return State::workspaceState()->create(id, monitor->m_id, "", true);
+        return createNumberedWorkspace(id, monitor, "", true);
     }
 
     // Nearest card to a sidebar point, gaps included: stretched spacing would
@@ -503,7 +505,7 @@ bool StageController::Impl::blocked() const {
 }
 
 bool StageController::Impl::ownsTransition(const PHLWORKSPACE& workspace, bool allowCovered) const {
-    if (!enabled || !workspace || workspace->m_isSpecialWorkspace || blocked())
+    if (!enabled || !workspace || (workspace->type() == ::Workspace::eWorkspaceType::SPECIAL) || blocked())
         return false;
     const auto monitor = workspace->m_monitor.lock();
     if (!monitor || monitor->m_activeSpecialWorkspace)
@@ -588,11 +590,11 @@ void StageController::Impl::prepareSwipe(const PHLWORKSPACE& target) {
     visual.revealFromBottom = swipe->native->m_delta > 0;
     // A new workspace has no native object until the gesture commits. Build
     // its empty desktop now so outgoing windows still follow the finger.
-    visual.active = target ? target->m_id : swipe->requestedTarget;
+    visual.active = target ? workspaceNumericId(target) : swipe->requestedTarget;
     visual.right = smartisan ? !source->right : source->right;
     visual.cards.clear();
     for (const auto& workspace : State::workspaceState()->workspaces()) {
-        if (workspace->m_isSpecialWorkspace || workspace->m_monitor != monitor ||
+        if ((workspace->type() == ::Workspace::eWorkspaceType::SPECIAL) || workspace->m_monitor != monitor ||
             (setting("stage_show_active", 0) == 0 && workspace == target) ||
             (!setting("stage_show_empty", 1) && workspace->getWindowCount(std::nullopt, false) == 0))
             continue;
@@ -611,7 +613,7 @@ void StageController::Impl::prepareSwipe(const PHLWORKSPACE& target) {
         if ((ida > 0) != (idb > 0))
             return ida > 0;
         return ida > 0 ? ida < idb :
-            (a.workspace.lock() && b.workspace.lock() && a.workspace.lock()->m_name < b.workspace.lock()->m_name);
+            (a.workspace.lock() && b.workspace.lock() && a.workspace.lock()->displayName() < b.workspace.lock()->displayName());
     });
     visual.geometry = stage::layout(visual.base.w, visual.base.h, visual.cards.size(), settingsForSide(visual.right), std::nullopt, monitor->m_size.x);
     visual.scroll = visual.geometry.clampScroll(visual.scroll);
@@ -630,17 +632,17 @@ void StageController::Impl::prepareSwipe(const PHLWORKSPACE& target) {
     visual.paneTransition = visual.right != source->right;
     std::vector<std::pair<PHLWINDOWREF, CBox>> origins;
     for (const auto& window : Desktop::windowState()->windows())
-        if (window->m_monitor == monitor && window->m_isMapped && !window->isHidden() && !window->m_pinned)
+        if (window->m_monitor == monitor && window->mapped() && !window->isHidden() && !static_cast<bool>(window->m_state & Desktop::View::WINDOW_STATE_PINNED))
             origins.emplace_back(window, setting("stage_window_decorations", 0) ? window->getFullWindowBoundingBox() :
                 CBox{window->positionAnimation()->value(), window->sizeAnimation()->value()});
-    startFlights(visual, origin->m_id, source->cards, source->geometry, source->scroll, source->right, origins, target, false);
+    startFlights(visual, workspaceNumericId(origin), source->cards, source->geometry, source->scroll, source->right, origins, target, false);
     for (auto& flight : visual.flights) {
         const auto window = flight.preview.window.lock();
         if (!window)
             continue;
         if (window->m_workspace == target) {
             flight.to = flight.preview.natural;
-            if (!window->m_isFloating)
+            if (!window->isFloating())
                 flight.to.translate(tiledOffset);
         } else {
             for (std::size_t i = 0; i < visual.cards.size(); ++i) {
@@ -707,15 +709,15 @@ void StageController::Impl::updateSwipe(double delta) {
     const bool useR = numberSetting("gestures:workspace_swipe_use_r", 0);
     auto id = getWorkspaceIDNameFromString(useR ? (left ? "r-1" : "r+1") : (left ? "m-1" : "m+1")).id;
     const bool create = numberSetting("gestures:workspace_swipe_create_new", 1);
-    if (!left && id <= swipe->origin->m_id && create)
+    if (!left && id <= workspaceNumericId(swipe->origin) && create)
         id = getWorkspaceIDNameFromString("r+1").id;
-    if ((left && id >= swipe->origin->m_id) || id == WORKSPACE_INVALID || id == swipe->origin->m_id) {
+    if ((left && id >= workspaceNumericId(swipe->origin)) || id == WORKSPACE_INVALID || id == workspaceNumericId(swipe->origin)) {
         native->m_delta = 0;
         swipe->progress = 0;
         return;
     }
     swipe->requestedTarget = id;
-    const auto target = State::workspaceState()->query().id(id).run();
+    const auto target = findNumberedWorkspace(id);
     if ((target && target->m_monitor == monitor) || (!target && create)) {
         if (!swipe->prepared || swipe->target != target || swipe->visual.active != id)
             prepareSwipe(target);
@@ -768,7 +770,7 @@ void StageController::Impl::endSwipe() {
         }
         auto target = swipe->target.lock();
         if (!target && swipe->requestedTarget != WORKSPACE_INVALID && numberSetting("gestures:workspace_swipe_create_new", 1))
-            target = State::workspaceState()->create(swipe->requestedTarget, monitor->m_id);
+            target = createNumberedWorkspace(swipe->requestedTarget, monitor);
         if (!target) {
             clearSwipe();
             return;
@@ -983,7 +985,7 @@ void StageController::Impl::afterRecheck(Layout::CSpace* space) {
     if (!enabled || !space)
         return;
     const auto workspace = space->workspace();
-    if (!workspace || workspace->m_isSpecialWorkspace)
+    if (!workspace || (workspace->type() == ::Workspace::eWorkspaceType::SPECIAL))
         return;
     const auto monitor = workspace->m_monitor.lock();
     auto* screen = screenFor(monitor);
@@ -1099,12 +1101,12 @@ void StageController::Impl::sync() {
         }
         const auto base = baseArea(monitor);
         const auto oldGeometry = screen->geometry;
-        const bool switching = screen->active != WORKSPACE_INVALID && monitor->m_activeWorkspace && screen->active != monitor->m_activeWorkspace->m_id;
+        const bool switching = screen->active != WORKSPACE_INVALID && monitor->m_activeWorkspace && screen->active != workspaceNumericId(monitor->m_activeWorkspace);
         const bool changedOutput = !sameBox(base, screen->base) || screen->scale != monitor->m_scale || screen->transform != static_cast<int>(monitor->m_transform);
         if (switching && !changedOutput && !changedPolicy && !reconfigure && !blocked() && !screen->covered && !screen->suspended) {
             pendingFlights.push_back({monitor, screen->active, screen->cards, oldGeometry, screen->scroll, screen->right, {}});
             for (const auto& window : Desktop::windowState()->windows()) {
-                if (window->m_monitor == monitor && window->m_isMapped && !window->isHidden() && !window->m_pinned)
+                if (window->m_monitor == monitor && window->mapped() && !window->isHidden() && !static_cast<bool>(window->m_state & Desktop::View::WINDOW_STATE_PINNED))
                     pendingFlights.back().origins.emplace_back(window, setting("stage_window_decorations", 0) ? window->getFullWindowBoundingBox() :
                         CBox{window->positionAnimation()->value(), window->sizeAnimation()->value()});
             }
@@ -1129,7 +1131,7 @@ void StageController::Impl::sync() {
 
         std::vector<Card> targets;
         for (const auto& workspace : workspaces) {
-            if (workspace->m_isSpecialWorkspace || workspace->m_monitor != monitor)
+            if ((workspace->type() == ::Workspace::eWorkspaceType::SPECIAL) || workspace->m_monitor != monitor)
                 continue;
             if (setting("stage_show_active", 0) == 0 && workspace == monitor->m_activeWorkspace)
                 continue;
@@ -1149,7 +1151,7 @@ void StageController::Impl::sync() {
                     continue;
                 // Never synthesize a slot for an id owned by another monitor.
                 if (std::ranges::any_of(workspaces, [&](const auto& workspace) {
-                        return workspace && !workspace->m_isSpecialWorkspace && workspace->m_id == id && workspace->m_monitor != monitor;
+                        return workspace && (workspace->type() != ::Workspace::eWorkspaceType::SPECIAL) && workspaceNumericId(workspace) == id && workspace->m_monitor != monitor;
                     }))
                     continue;
                 targets.emplace_back(Card{.syntheticId = id});
@@ -1160,7 +1162,7 @@ void StageController::Impl::sync() {
             if ((ida > 0) != (idb > 0))
                 return ida > 0;
             return ida > 0 ? ida < idb :
-                (a.workspace.lock() && b.workspace.lock() && a.workspace.lock()->m_name < b.workspace.lock()->m_name);
+                (a.workspace.lock() && b.workspace.lock() && a.workspace.lock()->displayName() < b.workspace.lock()->displayName());
         });
         bool changedCards = targets.size() != screen->cards.size();
         if (!changedCards) {
@@ -1205,7 +1207,7 @@ void StageController::Impl::sync() {
                     armMotion();
             }
         }
-        const WORKSPACEID active = monitor->m_activeWorkspace ? monitor->m_activeWorkspace->m_id : WORKSPACE_INVALID;
+        const WORKSPACEID active = monitor->m_activeWorkspace ? workspaceNumericId(monitor->m_activeWorkspace) : WORKSPACE_INVALID;
         const bool changedActive = screen->active != active;
         screen->active = active;
         const auto mode = monitor->m_activeWorkspace ? Fullscreen::controller()->getFullscreenModes(monitor->m_activeWorkspace).internal : Fullscreen::FSMODE_NONE;
@@ -1250,7 +1252,7 @@ void StageController::Impl::sync() {
             // Resolve native layout animations once, after saving source boxes,
             // so a second position/size animation cannot continue after a flight.
             for (const auto& window : Desktop::windowState()->windows()) {
-                if (window->m_monitor != pending.monitor || !window->m_isMapped || window->isHidden() || window->m_pinned || window->onSpecialWorkspace())
+                if (window->m_monitor != pending.monitor || !window->mapped() || window->isHidden() || static_cast<bool>(window->m_state & Desktop::View::WINDOW_STATE_PINNED) || window->onSpecialWorkspace())
                     continue;
                 window->positionAnimation()->warp();
                 window->sizeAnimation()->warp();
@@ -1485,10 +1487,10 @@ void StageController::Impl::updateDragHover() {
         }
     }
     const bool inGap = thumbnailDrag && screen && !index && !onDesktop;
-    if (!enabled || blocked() || cancelDrop || !window || !window->m_isMapped || window->m_pinned || !screen || (!index && !onDesktop && !inGap) ||
+    if (!enabled || blocked() || cancelDrop || !window || !window->mapped() || static_cast<bool>(window->m_state & Desktop::View::WINDOW_STATE_PINNED) || !screen || (!index && !onDesktop && !inGap) ||
         (!thumbnailDrag && screen->cards[*index].workspace == window->m_workspace)) {
         clearDragHover();
-        if (!enabled || blocked() || !window || !window->m_isMapped)
+        if (!enabled || blocked() || !window || !window->mapped())
             thumbnailDrag.reset();
         return;
     }
@@ -1588,13 +1590,13 @@ void StageController::Impl::button(const IPointer::SButtonEvent& event, Event::S
     info.cancelled = true;
     swallowedButtons.insert(event.button);
     if (event.button == BTN_LEFT && event.state == WL_POINTER_BUTTON_STATE_PRESSED) {
-        if (index && (g_pInputManager->getModsFromAllKBs() & 64)) {
+        if (index && static_cast<bool>(g_pInputManager->getModsFromAllKBs() & Input::HL_MODIFIER_META)) {
             const auto& card = screen->cards[*index];
             const Vector2D origin{sidebar(*screen).x + screen->geometry.padding, screen->base.y + cardTop(*screen, *index)};
             for (auto it = card.previews.rbegin(); it != card.previews.rend(); ++it) {
                 const auto window = it->window.lock();
                 const auto box = it->target.copy().translate(origin);
-                if (!window || !window->m_isMapped || window->isHidden() || window->m_pinned || !box.containsPoint(g_pInputManager->getMouseCoordsInternal()))
+                if (!window || !window->mapped() || window->isHidden() || static_cast<bool>(window->m_state & Desktop::View::WINDOW_STATE_PINNED) || !box.containsPoint(g_pInputManager->getMouseCoordsInternal()))
                     continue;
                 thumbnailDrag = window;
                 pressed.reset();
@@ -1661,7 +1663,7 @@ void StageController::Impl::finishThumbnailDrag() {
     clearDragHover();
     if (!window || !destination || !monitor || blocked() || cancelDrop)
         return;
-    const bool toDesktop = destination->isVisible();
+    const bool toDesktop = destination->visible();
     finishDrop(destination, window, from, stage::previewRounding(numberSetting("plugin:hymission:stage_window_rounding", -1),
         numberSetting("decoration:rounding", 0), from.w, from.h), center, {}, center);
     if (!toDesktop || window->m_workspace != destination)
@@ -1675,7 +1677,7 @@ void StageController::Impl::finishThumbnailDrag() {
         const CBox target = setting("stage_window_decorations", 0) ? window->getFullWindowBoundingBox() :
             CBox{window->positionAnimation()->value(), window->sizeAnimation()->value()};
         screen->flights.push_back({Preview{window, target, target}, from, target,
-            static_cast<float>(stage::previewRounding(-1, numberSetting("decoration:rounding", 0), from.w, from.h)), window->rounding()});
+            static_cast<float>(stage::previewRounding(-1, numberSetting("decoration:rounding", 0), from.w, from.h)), window->presentation().rounding()});
         screen->flightStart = Clock::now();
         screen->flightDuration = std::clamp(setting("stage_transition_ms", 300), 0L, 2000L);
         updatePreviewLiveness();
@@ -1685,7 +1687,7 @@ void StageController::Impl::finishThumbnailDrag() {
 }
 
 void StageController::Impl::activate(const PHLWORKSPACE& workspace) {
-    if (!workspace || workspace->m_isSpecialWorkspace)
+    if (!workspace || (workspace->type() == ::Workspace::eWorkspaceType::SPECIAL))
         return;
     const auto monitor = workspace->m_monitor.lock();
     if (!monitor)
@@ -1706,7 +1708,7 @@ void StageController::Impl::swapWorkspaces(const PHLWORKSPACE& a, const PHLWORKS
         return;
     std::vector<PHLWINDOW> aWindows, bWindows;
     for (const auto& window : Desktop::windowState()->windows()) {
-        if (!window->m_isMapped || window->isHidden() || window->m_pinned || window->onSpecialWorkspace())
+        if (!window->mapped() || window->isHidden() || static_cast<bool>(window->m_state & Desktop::View::WINDOW_STATE_PINNED) || window->onSpecialWorkspace())
             continue;
         if (window->m_workspace == a)
             aWindows.push_back(window);
@@ -1715,16 +1717,16 @@ void StageController::Impl::swapWorkspaces(const PHLWORKSPACE& a, const PHLWORKS
     }
     if (aWindows.empty() && bWindows.empty())
         return;
-    const bool aWasPersistent = a->isPersistent();
-    const bool bWasPersistent = b->isPersistent();
-    a->setPersistent(true);
-    b->setPersistent(true);
+    const bool aWasPersistent = workspaceIsPersistent(a);
+    const bool bWasPersistent = workspaceIsPersistent(b);
+    setWorkspacePersistent(a, true);
+    setWorkspacePersistent(b, true);
     for (const auto& window : aWindows)
         Desktop::globalWindowController()->moveWindowToWorkspace(window, b);
     for (const auto& window : bWindows)
         Desktop::globalWindowController()->moveWindowToWorkspace(window, a);
-    a->setPersistent(aWasPersistent);
-    b->setPersistent(bWasPersistent);
+    setWorkspacePersistent(a, aWasPersistent);
+    setWorkspacePersistent(b, bWasPersistent);
     forceRefresh = true;
     request();
 }
@@ -1761,7 +1763,7 @@ void StageController::Impl::endDrag(Layout::Supplementary::CDragStateController*
                 grabOffset = pointer - window->positionAnimation()->value();
                 dropOrigin = setting("stage_window_decorations", 0) ? window->getFullWindowBoundingBox() :
                     CBox{window->positionAnimation()->value(), window->sizeAnimation()->value()};
-                dropRadius = window->rounding();
+                dropRadius = window->presentation().rounding();
                 if (dragHover && dragHover->window == window) {
                     dropOrigin = dragHoverBox();
                     dropRadius = stage::previewRounding(numberSetting("plugin:hymission:stage_window_rounding", -1),
@@ -1784,19 +1786,19 @@ void StageController::Impl::finishDrop(const PHLWORKSPACE& destination, const PH
                                      std::optional<Vector2D> floatingCenter) {
     // Use the compositor's normal move path after its drag controller has
     // restored tiling/floating and completed the pointer grab.
-    if (destination && window && window->m_isMapped && window->m_workspace != destination &&
-        State::workspaceState()->query().id(destination->m_id).run() == destination && destination->m_monitor) {
+    if (destination && window && window->mapped() && window->m_workspace != destination &&
+        findNumberedWorkspace(workspaceNumericId(destination)) == destination && destination->m_monitor) {
         const auto monitor = destination->m_monitor.lock();
         Desktop::globalWindowController()->moveWindowToWorkspace(window, destination);
-        if (const auto target = window->layoutTarget(); target && target->space() == destination->m_space) {
+        if (const auto target = window->layoutTarget(); target && target->space() == destination->space()) {
             if (target->floating()) {
                 const auto size = target->position().size();
                 target->setPositionGlobal(CBox{floatingCenter ? *floatingCenter - size / 2 : dropPoint - grabOffset, size});
             } else {
                 // Reinsert through the destination algorithm with a global
                 // focal point; never warp the real cursor into a hidden desktop.
-                destination->m_space->remove(target);
-                destination->m_space->move(target, dropPoint);
+                destination->space()->remove(target);
+                destination->space()->move(target, dropPoint);
             }
         }
         if (auto* screen = screenFor(monitor))
@@ -1804,16 +1806,16 @@ void StageController::Impl::finishDrop(const PHLWORKSPACE& destination, const PH
         if (setting("stage_drop_follow", 0)) {
             activate(destination);
             Desktop::focusState()->fullWindowFocus(window, Desktop::FOCUS_REASON_WORKSPACE_CHANGE);
-        } else if (!destination->isVisible() && Desktop::focusState()->window() == window) {
+        } else if (!destination->visible() && Desktop::focusState()->window() == window) {
             const auto focusedMonitor = Desktop::focusState()->monitor();
             const auto current = focusedMonitor ? focusedMonitor->m_activeWorkspace : nullptr;
-            auto focus = current ? current->m_lastFocusedWindow.lock() : nullptr;
+            auto focus = current ? current->getLastFocusedWindow() : nullptr;
             if (!focus || focus == window || focus->m_workspace != current)
                 focus = current ? current->getFirstWindow() : nullptr;
             Desktop::focusState()->fullWindowFocus(focus, Desktop::FOCUS_REASON_WORKSPACE_CHANGE);
         }
         const double duration = std::clamp(setting("stage_transition_ms", 300), 0L, 2000L);
-        if (!setting("stage_drop_follow", 0) && !destination->isVisible() && duration > 0 && numberSetting("animations:enabled", 1) && !blocked()) {
+        if (!setting("stage_drop_follow", 0) && !destination->visible() && duration > 0 && numberSetting("animations:enabled", 1) && !blocked()) {
             // Resolve the destination layout and sidebar before constructing the
             // flight. The source was saved before native dragEnd restored tiling.
             lastDragged.reset();
@@ -1869,7 +1871,7 @@ void StageController::Impl::finishDrop(const PHLWORKSPACE& destination, const PH
 void StageController::Impl::correctFloating(const PHLMONITOR& monitor, const CBox& desktop) {
     const auto* drag = g_layoutManager->dragController().get();
     for (const auto& window : Desktop::windowState()->windows()) {
-        if (!window->m_isMapped || !window->m_isFloating || window->m_monitor != monitor || window->onSpecialWorkspace() || Fullscreen::controller()->isFullscreen(window) ||
+        if (!window->mapped() || !window->isFloating() || window->m_monitor != monitor || window->onSpecialWorkspace() || Fullscreen::controller()->isFullscreen(window) ||
             (drag && drag->target() && drag->target()->window() == window))
             continue;
         const auto target = window->layoutTarget();
@@ -1976,7 +1978,7 @@ void StageController::Impl::draw(const PHLMONITOR& monitor) {
         if (card.previewsReady) {
             for (const auto& preview : card.previews) {
                 const auto window = preview.window.lock();
-                if (!window || !window->m_isMapped || window->isHidden() || window->m_pinned || window->m_workspace != workspace || flying(*screen, window) || thumbnailDrag == window)
+                if (!window || !window->mapped() || window->isHidden() || static_cast<bool>(window->m_state & Desktop::View::WINDOW_STATE_PINNED) || window->m_workspace != workspace || flying(*screen, window) || thumbnailDrag == window)
                     continue;
                 const auto radius = stage::previewRounding(numberSetting("plugin:hymission:stage_window_rounding", -1),
                     numberSetting("decoration:rounding", 0), preview.target.w, preview.target.h);
@@ -2108,7 +2110,7 @@ double StageController::Impl::flightProgress(const Screen& screen) const {
 }
 
 bool StageController::Impl::flying(const Screen& screen, const PHLWINDOW& window) const {
-    return window && !window->m_pinned && std::ranges::any_of(screen.flights, [&](const auto& flight) { return flight.preview.window == window; });
+    return window && !static_cast<bool>(window->m_state & Desktop::View::WINDOW_STATE_PINNED) && std::ranges::any_of(screen.flights, [&](const auto& flight) { return flight.preview.window == window; });
 }
 
 void StageController::Impl::startFlights(Screen& screen, WORKSPACEID previous, const std::vector<Card>& oldCards,
@@ -2125,10 +2127,10 @@ void StageController::Impl::startFlights(Screen& screen, WORKSPACEID previous, c
     auto previousFlights = std::move(screen.flights);
     std::vector<PHLWORKSPACE> workspaces;
     const auto addWorkspace = [&](const PHLWORKSPACE& workspace) {
-        if (workspace && workspace->m_monitor == monitor && !workspace->m_isSpecialWorkspace && std::ranges::find(workspaces, workspace) == workspaces.end())
+        if (workspace && workspace->m_monitor == monitor && (workspace->type() != ::Workspace::eWorkspaceType::SPECIAL) && std::ranges::find(workspaces, workspace) == workspaces.end())
             workspaces.push_back(workspace);
     };
-    addWorkspace(State::workspaceState()->query().id(previous).run());
+    addWorkspace(findNumberedWorkspace(previous));
     addWorkspace(activeWorkspace);
     for (const auto& flight : previousFlights) {
         if (const auto window = flight.preview.window.lock())
@@ -2183,15 +2185,15 @@ void StageController::Impl::startFlights(Screen& screen, WORKSPACEID previous, c
             const auto origin = std::ranges::find_if(origins, [&](const auto& entry) { return entry.first == window; });
             const auto originalBox = origin == origins.end() ? preview.natural : origin->second;
             const auto from = old != previousFlights.end() ? std::optional<CBox>{interpolate(old->from, old->to, oldProgress)} :
-                workspace->m_id == previous ? std::optional<CBox>{originalBox} : miniature(workspace, originalBox, oldCards, oldGeometry, oldScroll, oldRight, window, true);
+                workspaceNumericId(workspace) == previous ? std::optional<CBox>{originalBox} : miniature(workspace, originalBox, oldCards, oldGeometry, oldScroll, oldRight, window, true);
             const auto goal = setting("stage_window_decorations", 0) ? preview.natural : CBox{window->positionAnimation()->goal(), window->sizeAnimation()->goal()};
             const auto to = workspace == activeWorkspace ? std::optional<CBox>{preview.natural} :
                 miniature(workspace, goal, screen.cards, screen.geometry, screen.scroll, screen.right, window, false);
             if (!from || !to)
                 continue;
-            const auto nativeRadius = window->rounding();
+            const auto nativeRadius = window->presentation().rounding();
             const double fromRadius = old != previousFlights.end() ? old->fromRadius + (old->toRadius - old->fromRadius) * stage::transitionProgress(oldProgress, 1) :
-                workspace->m_id == previous ? nativeRadius : radius(*from);
+                workspaceNumericId(workspace) == previous ? nativeRadius : radius(*from);
             const double toRadius = workspace == activeWorkspace ? nativeRadius : radius(*to);
             screen.flights.push_back({std::move(preview), *from, *to, static_cast<float>(fromRadius), static_cast<float>(toRadius)});
         }
@@ -2267,7 +2269,7 @@ void StageController::Impl::drawPreview(const PHLWINDOW& window, const PHLMONITO
         Render::SRenderModifData transform;
         const auto offset = window->m_workspace ? window->m_workspace->m_renderOffset->value() : Vector2D{};
         transform.modifs.emplace_back(Render::SRenderModifData::RMOD_TYPE_TRANSLATE,
-            (monitor->m_position - footprint.pos() - offset - window->m_floatingOffset) * monitor->m_scale);
+            (monitor->m_position - footprint.pos() - offset - window->presentation().floatingOffset()) * monitor->m_scale);
         transform.modifs.emplace_back(Render::SRenderModifData::RMOD_TYPE_SCALE, static_cast<float>(scale));
         transform.modifs.emplace_back(Render::SRenderModifData::RMOD_TYPE_TRANSLATE, (fitted.pos() - monitor->m_position) * monitor->m_scale);
         state.renderModif = transform;
@@ -2275,7 +2277,7 @@ void StageController::Impl::drawPreview(const PHLWINDOW& window, const PHLMONITO
         drawingDecoration = true;
         decorationRadius = radius / scale;
         decorationClip = clip;
-        for (const auto& decoration : window->m_windowDecorations) {
+        for (const auto& decoration : window->presentation().decorations()) {
             const auto layer = decoration->getDecorationLayer();
             if (below == (layer == DECORATION_LAYER_BOTTOM || layer == DECORATION_LAYER_UNDER))
                 decoration->draw(monitor, 1.F);
@@ -2293,7 +2295,7 @@ void StageController::Impl::drawPreview(const PHLWINDOW& window, const PHLMONITO
     data.clipBox = clip;
     data.rounding = static_cast<int>(std::lround(radius * monitor->m_scale)) + 1;
     data.dontRound = radius <= 0;
-    data.roundingPower = window->roundingPower();
+    data.roundingPower = window->presentation().roundingPower();
     data.blur = shouldBlur && shouldBlur(g_pHyprRenderer.get(), window);
     data.blockBlurOptimization = true;
     // Use the compositor's native surface path, including viewport/UV handling,
@@ -2323,7 +2325,7 @@ void StageController::Impl::drawFlights(Screen& screen, const PHLMONITOR& monito
                     bounds.width * monitor->m_scale, bounds.height * monitor->m_scale};
     for (auto& flight : screen.flights) {
         const auto window = flight.preview.window.lock();
-        if (!window || !window->m_isMapped || window->isHidden() || window->m_pinned || window->m_monitor != monitor)
+        if (!window || !window->mapped() || window->isHidden() || static_cast<bool>(window->m_state & Desktop::View::WINDOW_STATE_PINNED) || window->m_monitor != monitor)
             continue;
         if ((!swipe || &swipe->visual != &screen) && window->m_workspace == monitor->m_activeWorkspace)
             flight.to = setting("stage_window_decorations", 0) ? window->getFullWindowBoundingBox() : CBox{window->positionAnimation()->value(), window->sizeAnimation()->value()};
@@ -2413,7 +2415,7 @@ void StageController::Impl::updatePreviewLiveness() {
     std::vector<PHLWINDOWREF> visible;
     const auto add = [&](const PHLWINDOWREF& ref) {
         const auto window = ref.lock();
-        if (!window || !window->m_isMapped || window->isHidden() || window->m_pinned)
+        if (!window || !window->mapped() || window->isHidden() || static_cast<bool>(window->m_state & Desktop::View::WINDOW_STATE_PINNED))
             return;
         if (std::ranges::find(visible, ref) == visible.end()) {
             visible.push_back(ref);
@@ -2446,7 +2448,7 @@ void StageController::Impl::updatePreviewLiveness() {
         if (std::ranges::find(visible, ref) != visible.end())
             continue;
         if (const auto window = ref.lock())
-            window->setSuspended(window->isHidden() || !window->m_workspace || !window->m_workspace->isVisible());
+            window->setSuspended(window->isHidden() || !window->m_workspace || !window->m_workspace->visible());
     }
     livePreviewWindows = std::move(visible);
 }
@@ -2466,7 +2468,7 @@ bool StageController::Impl::updatePreviews(Screen& screen, Card& card, const Vec
     std::vector<CBox> boxes;
     std::vector<WindowInput> inputs;
     for (const auto& window : Desktop::windowState()->windows()) {
-        if (!window->m_isMapped || window->isHidden() || window->onSpecialWorkspace() || window->m_pinned)
+        if (!window->mapped() || window->isHidden() || window->onSpecialWorkspace() || static_cast<bool>(window->m_state & Desktop::View::WINDOW_STATE_PINNED))
             continue;
         if (window->m_workspace == workspace) {
             const auto box = decorations ? window->getFullWindowBoundingBox() : CBox{window->positionAnimation()->value(), window->sizeAnimation()->value()};
@@ -2476,7 +2478,7 @@ bool StageController::Impl::updatePreviews(Screen& screen, Card& card, const Vec
             // depict its destination, not bake the intermediate layout slide
             // into a thumbnail that persists until the next refresh.
             const auto offset = (smartisan ? window->positionAnimation()->goal() - window->positionAnimation()->value() : Vector2D{}) +
-                (window->m_isFloating ? Vector2D{} : tiledOffset);
+                (window->isFloating() ? Vector2D{} : tiledOffset);
             inputs.push_back(WindowInput{.index = windows.size(), .natural = Rect{box.x + offset.x, box.y + offset.y, box.w, box.h}});
             boxes.push_back(box);
             windows.push_back(window);
@@ -2530,7 +2532,7 @@ std::string StageController::Impl::stateJson() const {
         nlohmann::json cards = nlohmann::json::array();
         for (const auto& card : screen.cards) {
             if (const auto workspace = card.workspace.lock())
-                cards.push_back({{"workspace", workspace->m_id}, {"name", workspace->m_name}, {"previews_ready", card.previewsReady}});
+                cards.push_back({{"workspace", workspaceNumericId(workspace)}, {"name", workspace->displayName()}, {"previews_ready", card.previewsReady}});
             else if (card.syntheticId > 0)
                 cards.push_back({{"workspace", card.syntheticId}, {"name", "empty:" + std::to_string(card.syntheticId)}, {"synthetic", true},
                     {"previews_ready", true}});
@@ -2557,7 +2559,7 @@ std::string StageController::stateJson() const { return m_impl->stateJson(); }
 
 std::optional<Rect> StageController::overviewOrigin(const PHLWINDOW& window) {
     auto* self = Impl::instance;
-    if (!self || !self->enabled || self->blocked() || !window || window->m_pinned)
+    if (!self || !self->enabled || self->blocked() || !window || static_cast<bool>(window->m_state & Desktop::View::WINDOW_STATE_PINNED))
         return std::nullopt;
     const auto monitor = window->m_monitor.lock();
     auto* screen = self->visualScreenFor(monitor);

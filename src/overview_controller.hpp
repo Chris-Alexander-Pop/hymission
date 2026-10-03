@@ -1,4 +1,5 @@
 #pragma once
+#include "hypr_compat.hpp"
 #include "search_child_process.hpp"
 #include <hyprland/src/config/shared/complex/ComplexDataTypes.hpp>
 
@@ -14,6 +15,7 @@
 #include <vector>
 #include <sys/types.h>
 
+#include <hyprland/src/input/Keys.hpp>
 #include <hyprland/src/SharedDefs.hpp>
 #include <hyprland/src/desktop/DesktopTypes.hpp>
 #include <hyprland/src/desktop/view/Group.hpp>
@@ -88,6 +90,7 @@ class OverviewController {
     [[nodiscard]] std::string     handleCaptureInputCommand(const std::string& args);
     [[nodiscard]] bool            rawWindowRenderActive() const;
     [[nodiscard]] bool            captureInputSuppressed() const;
+    [[nodiscard]] bool            isVisible() const;
     [[nodiscard]] bool            suspendsStage() const { return isVisible() || rawWindowRenderActive() || captureInputSuppressed(); }
     [[nodiscard]] bool            allowsWorkspaceSwitchInOverviewForGestures() const;
     [[nodiscard]] bool            blocksWorkspaceSwitchInOverviewForGestures() const;
@@ -356,7 +359,7 @@ class OverviewController {
     struct GestureRegistration {
         std::size_t               fingerCount = 0;
         eTrackpadGestureDirection direction = TRACKPAD_GESTURE_DIR_NONE;
-        uint32_t                  modMask = 0;
+        Input::ModifierMask       modMask = Input::HL_MODIFIER_NONE;
         float                     deltaScale = 1.0F;
         bool                      disableInhibit = false;
     };
@@ -618,7 +621,6 @@ class OverviewController {
     void                       restoreWrappedDispatchers();
 
     [[nodiscard]] bool         isAnimating() const;
-    [[nodiscard]] bool         isVisible() const;
     [[nodiscard]] bool         shouldHandleInput() const;
     [[nodiscard]] bool         insideRenderLifecycle() const;
     [[nodiscard]] std::vector<PHLMONITOR> ownedMonitors() const;
@@ -909,6 +911,8 @@ class OverviewController {
     SurfaceBlurNeedsFn        m_surfaceNeedsPrecomputeBlurOriginal = nullptr;
     ShouldRenderWindowFn      m_shouldRenderWindowOriginal = nullptr;
     EffectiveAlphaFn          m_effectiveAlphaOriginal = nullptr;
+    // alphaTotal's this is the presentation object. effectiveAlpha's this was the window.
+    bool                      m_effectiveAlphaThisIsPresentation = false;
     RendererDrawElementFn     m_rendererDrawElementOriginal = nullptr;
     RenderLayerFn             m_renderLayerOriginal = nullptr;
     BorderDrawFn              m_borderDrawOriginal = nullptr;
