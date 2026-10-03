@@ -7365,7 +7365,10 @@ bool OverviewController::installHooks() {
             m_handleGestureOriginal = nullptr;
         }
     } else {
-        notify("[hymission] gesture config hook not found; dispatcher controls still work", CHyprColor(1.0, 0.65, 0.2, 1.0), 4000);
+        // This Hyprland is Lua-only and has no CConfigManager::handleGesture.
+        // hl.plugin.hymission.gesture() is the entry. A missing legacy hook is
+        // not a load failure.
+        debugLog("[hymission] gesture config hook not found; use hl.plugin.hymission.gesture");
     }
 
     if (!hookFunction("shouldRenderWindow",
