@@ -6813,7 +6813,7 @@ void OverviewController::requestOverviewWorkspaceTransitionCommit(bool followGes
     if (!m_workspaceTransition.active)
         return;
 
-    if (!(g_pHyprOpenGL && g_pHyprRenderer->m_renderData.pMonitor)) {
+    if (!insideRenderLifecycle()) {
         commitOverviewWorkspaceTransition(followGesture);
         return;
     }
@@ -6846,7 +6846,7 @@ void OverviewController::requestOverviewWorkspaceTransitionCommit(bool followGes
         // Workspace transition commit mutates live workspace/window ownership.
         // If a frame is still rendering, reschedule instead of tearing the render
         // state mid-frame.
-        if (g_pHyprOpenGL && g_pHyprRenderer->m_renderData.pMonitor) {
+        if (insideRenderLifecycle()) {
             requestOverviewWorkspaceTransitionCommit(followGesture);
             return;
         }
@@ -7954,7 +7954,8 @@ bool OverviewController::shouldSyncRealFocusDuringOverview() const {
 }
 
 bool OverviewController::insideRenderLifecycle() const {
-    return m_surfaceRenderDataTransformDepth > 0 || m_stripSnapshotRenderDepth > 0 || (g_pHyprOpenGL && g_pHyprRenderer->m_renderData.pMonitor);
+    const auto renderMonitor = (g_pHyprOpenGL && g_pHyprRenderer) ? g_pHyprRenderer->m_renderData.pMonitor.lock() : nullptr;
+    return m_surfaceRenderDataTransformDepth > 0 || m_stripSnapshotRenderDepth > 0 || (renderMonitor && renderMonitor->m_renderingActive);
 }
 
 bool OverviewController::ownsMonitor(const PHLMONITOR& monitor) const {
@@ -11847,7 +11848,7 @@ void OverviewController::scheduleDeactivate() {
         if (!m_deactivatePending || !isVisible())
             return;
 
-        if (g_pHyprOpenGL && g_pHyprRenderer->m_renderData.pMonitor) {
+        if (insideRenderLifecycle()) {
             scheduleDeactivate();
             return;
         }
@@ -14100,7 +14101,7 @@ void OverviewController::refreshWorkspaceStripSnapshots() {
         return;
     }
 
-    if (m_stripSnapshotRenderDepth > 0 || (g_pHyprOpenGL && g_pHyprRenderer->m_renderData.pMonitor)) {
+    if (insideRenderLifecycle()) {
         m_stripSnapshotsDirty = true;
         scheduleWorkspaceStripSnapshotRefresh();
         return;

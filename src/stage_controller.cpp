@@ -972,6 +972,8 @@ void StageController::Impl::initialize() {
 void StageController::Impl::request(bool dirty) {
     if (shuttingDown || rendering)
         return;
+    if (!enabled && setting("stage_enabled", 0) == 0)
+        return;
     forceRefresh |= dirty;
     if (deferred || !g_pEventLoopManager)
         return;
@@ -1008,12 +1010,24 @@ void StageController::Impl::afterRecheck(Layout::CSpace* space) {
 void StageController::Impl::sync() {
     if (syncing || shuttingDown)
         return;
-    if (g_pHyprRenderer && g_pHyprRenderer->m_renderData.pMonitor) {
-        request(false);
+    const bool wanted = setting("stage_enabled", 0) != 0;
+    if (!wanted && !enabled) {
+        forceRefresh = false;
+        return;
+    }
+    const auto renderMonitor = g_pHyprRenderer ? g_pHyprRenderer->m_renderData.pMonitor.lock() : nullptr;
+    if (rendering || (renderMonitor && renderMonitor->m_renderingActive)) {
+        stopTimer(refreshTimer);
+        if (g_pEventLoopManager) {
+            refreshTimer = makeShared<CEventLoopTimer>(std::chrono::milliseconds(1), [this](SP<CEventLoopTimer>, void*) {
+                stopTimer(refreshTimer);
+                request(false);
+            }, nullptr);
+            g_pEventLoopManager->addTimer(refreshTimer);
+        }
         return;
     }
     syncing = true;
-    const bool wanted = setting("stage_enabled", 0) != 0;
     const bool wasEnabled = enabled;
     enabled = wanted && installHooks();
     if (!enabled) {
@@ -2356,7 +2370,8 @@ void StageController::Impl::ensureBackground(Screen& screen, const PHLMONITOR& m
         screen.backgroundError.clear();
         return;
     }
-    if (g_pHyprRenderer->m_renderData.pMonitor)
+    const auto renderMonitor = g_pHyprRenderer->m_renderData.pMonitor.lock();
+    if (renderMonitor && renderMonitor->m_renderingActive)
         return; // never render offscreen inside a live pass
     const auto size = monitor->m_transformedSize;
     // Re-render periodically so live background-layer content (dashboards)
@@ -2385,7 +2400,8 @@ void StageController::Impl::ensureBackground(Screen& screen, const PHLMONITOR& m
 }
 
 void StageController::Impl::refreshPreviews() {
-    if (!enabled || blocked() || rendering || g_pHyprRenderer->m_renderData.pMonitor)
+    const auto renderMonitor = g_pHyprRenderer ? g_pHyprRenderer->m_renderData.pMonitor.lock() : nullptr;
+    if (!enabled || blocked() || rendering || (renderMonitor && renderMonitor->m_renderingActive))
         return;
     for (auto& screen : screens) {
         if (!interactive(screen))
