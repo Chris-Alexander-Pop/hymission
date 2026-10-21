@@ -188,7 +188,7 @@ class OverviewShadowPassElement final : public IPassElement {
         if (!g_pHyprOpenGL || m_box.width < 1 || m_box.height < 1 || m_range <= 0 || m_alpha <= 0.001F)
             return {};
 
-        g_pHyprOpenGL->renderRoundedShadow(m_box, m_round, m_roundingPower, m_range, m_color, m_alpha);
+        g_pHyprOpenGL->renderRoundedShadow(m_box, m_round, m_roundingPower, m_range, m_color, m_alpha, nullptr);
         return {};
     }
 
@@ -2210,11 +2210,11 @@ CRegion hkSurfaceVisibleRegion(void* surfacePassThisptr, bool& cancel) {
     return g_controller->surfaceVisibleRegionHook(surfacePassThisptr, cancel);
 }
 
-void hkBorderDraw(void* borderDecorationThisptr, PHLMONITOR monitor, const float& alpha) {
+void hkBorderDraw(void* borderDecorationThisptr, PHLMONITOR monitor, const float& alpha, const SP<Workspace::CWorkspacePresentable>& presentation) {
     if (!g_controller)
         return;
 
-    g_controller->borderDrawHook(borderDecorationThisptr, monitor, alpha);
+    g_controller->borderDrawHook(borderDecorationThisptr, monitor, alpha, presentation);
 }
 
 void hkCustomShadow(void* renderer, const CBox& box, int round, float power, int range,
@@ -2223,18 +2223,18 @@ void hkCustomShadow(void* renderer, const CBox& box, int round, float power, int
         g_controller->customShadowHook(renderer, box, round, power, range, color, alpha);
 }
 
-void hkShadowDraw(void* shadowDecorationThisptr, PHLMONITOR monitor, const float& alpha) {
+void hkShadowDraw(void* shadowDecorationThisptr, PHLMONITOR monitor, const float& alpha, const SP<Workspace::CWorkspacePresentable>& presentation) {
     if (!g_controller)
         return;
 
-    g_controller->shadowDrawHook(shadowDecorationThisptr, monitor, alpha);
+    g_controller->shadowDrawHook(shadowDecorationThisptr, monitor, alpha, presentation);
 }
 
-void hkGroupBarDraw(void* groupBarDecorationThisptr, PHLMONITOR monitor, const float& alpha) {
+void hkGroupBarDraw(void* groupBarDecorationThisptr, PHLMONITOR monitor, const float& alpha, const SP<Workspace::CWorkspacePresentable>& presentation) {
     if (!g_controller)
         return;
 
-    g_controller->groupBarDrawHook(groupBarDecorationThisptr, monitor, alpha);
+    g_controller->groupBarDrawHook(groupBarDecorationThisptr, monitor, alpha, presentation);
 }
 
 void hkCalculateUVForSurface(void* rendererThisptr, PHLWINDOW window, SP<CWLSurfaceResource> surface, PHLMONITOR monitor, bool main, const Vector2D& projSize,
@@ -4333,13 +4333,14 @@ void OverviewController::renderOverviewShadowForRect(const PHLWINDOW& window, co
 
     const float previewAlpha = managedPreviewAlphaFor(window, alpha);
     if (immediate)
-        g_pHyprOpenGL->renderRoundedShadow(shadowBox, shadowRound, static_cast<float>(roundingPower), renderRange, shadowColor, previewAlpha);
+        g_pHyprOpenGL->renderRoundedShadow(shadowBox, shadowRound, static_cast<float>(roundingPower), renderRange, shadowColor, previewAlpha, nullptr);
     else
         g_pHyprRenderer->m_renderPass.add(
             makeUnique<OverviewShadowPassElement>(shadowBox, shadowRound, static_cast<float>(roundingPower), renderRange, shadowColor, previewAlpha));
 }
 
-void OverviewController::borderDrawHook(void* borderDecorationThisptr, const PHLMONITOR& monitor, const float& alpha) {
+void OverviewController::borderDrawHook(void* borderDecorationThisptr, const PHLMONITOR& monitor, const float& alpha,
+                                         const SP<Workspace::CWorkspacePresentable>& presentation) {
     if (!m_borderDrawOriginal) {
         return;
     }
@@ -4347,7 +4348,7 @@ void OverviewController::borderDrawHook(void* borderDecorationThisptr, const PHL
     const auto window = g_pHyprRenderer->m_renderData.currentWindow.lock();
     if (nativeWindowRenderActive() || !window || !monitor || !isVisible() || !ownsMonitor(monitor) || !shouldApplyOverviewTransform(window) ||
         previewMonitorForWindow(window) != monitor) {
-        m_borderDrawOriginal(borderDecorationThisptr, monitor, alpha);
+        m_borderDrawOriginal(borderDecorationThisptr, monitor, alpha, presentation);
         return;
     }
 
@@ -4384,7 +4385,8 @@ void OverviewController::customShadowHook(void* renderer, const CBox& box, int r
                            std::max(1, static_cast<int>(std::lround(range * scale))), color, managedPreviewAlphaFor(window, alpha));
 }
 
-void OverviewController::shadowDrawHook(void* shadowDecorationThisptr, const PHLMONITOR& monitor, const float& alpha) {
+void OverviewController::shadowDrawHook(void* shadowDecorationThisptr, const PHLMONITOR& monitor, const float& alpha,
+                                         const SP<Workspace::CWorkspacePresentable>& presentation) {
     if (!m_shadowDrawOriginal) {
         return;
     }
@@ -4392,20 +4394,21 @@ void OverviewController::shadowDrawHook(void* shadowDecorationThisptr, const PHL
     const auto window = g_pHyprRenderer->m_renderData.currentWindow.lock();
     if (nativeWindowRenderActive() || !window || !monitor || !isVisible() || !ownsMonitor(monitor) || !shouldApplyOverviewTransform(window) ||
         previewMonitorForWindow(window) != monitor) {
-        m_shadowDrawOriginal(shadowDecorationThisptr, monitor, alpha);
+        m_shadowDrawOriginal(shadowDecorationThisptr, monitor, alpha, presentation);
         return;
     }
 
     renderOverviewShadowForWindow(window, monitor, alpha);
 }
 
-void OverviewController::groupBarDrawHook(void* groupBarDecorationThisptr, const PHLMONITOR& monitor, const float& alpha) {
+void OverviewController::groupBarDrawHook(void* groupBarDecorationThisptr, const PHLMONITOR& monitor, const float& alpha,
+                                           const SP<Workspace::CWorkspacePresentable>& presentation) {
     if (!m_groupBarDrawOriginal)
         return;
 
     const auto window = g_pHyprRenderer->m_renderData.currentWindow.lock();
     if (nativeWindowRenderActive() || !window || !monitor || !isVisible() || !ownsMonitor(monitor) || !hasManagedWindow(window))
-        m_groupBarDrawOriginal(groupBarDecorationThisptr, monitor, alpha);
+        m_groupBarDrawOriginal(groupBarDecorationThisptr, monitor, alpha, presentation);
 }
 
 void OverviewController::calculateUVForSurfaceHook(const PHLWINDOW& window, SP<CWLSurfaceResource> surface, const PHLMONITOR& monitor, bool main, const Vector2D& projSize,
@@ -13627,7 +13630,7 @@ void OverviewController::renderWorkspaceStripSnapshot(WorkspaceStripEntry& entry
 
     const int fbWidth = std::max(1, static_cast<int>(std::ceil(thumb.width * entry.monitor->m_scale)));
     const int fbHeight = std::max(1, static_cast<int>(std::ceil(thumb.height * entry.monitor->m_scale)));
-    using RenderWindowFn = void (*)(Render::IHyprRenderer*, PHLWINDOW, PHLMONITOR, const Time::steady_tp&, bool, Render::eRenderPassMode, bool, bool);
+    using RenderWindowFn = void (*)(Render::IHyprRenderer*, PHLWINDOW, PHLMONITOR, const SP<Workspace::CWorkspacePresentable>&, const Time::steady_tp&, bool, Render::eRenderPassMode, bool, bool);
 
     static RenderWindowFn renderWindowFn = nullptr;
     static bool           renderWindowResolved = false;
@@ -13983,7 +13986,7 @@ void OverviewController::renderWorkspaceStripSnapshot(WorkspaceStripEntry& entry
                     if (!managed.window || managed.isFloating != floating)
                         continue;
 
-                    renderWindowFn(g_pHyprRenderer.get(), managed.window, monitor, renderNow, false, Render::RENDER_PASS_ALL, false, true);
+                    renderWindowFn(g_pHyprRenderer.get(), managed.window, monitor, nullptr, renderNow, false, Render::RENDER_PASS_ALL, false, true);
                 }
             };
             renderPreviewWindows(false);

@@ -224,7 +224,7 @@ struct StageController::Impl {
     using DragEndFn = void (*)(Layout::Supplementary::CDragStateController*);
     using WindowAtFn = PHLWINDOW (*)(const Desktop::CViewHitTester*, const Vector2D&, uint16_t, PHLWINDOW);
     using RoundingFn = float (*)(Desktop::View::CWindow*);
-    using RenderWindowFn = void (*)(Render::IHyprRenderer*, PHLWINDOW, PHLMONITOR, const Time::steady_tp&, bool, Render::eRenderPassMode, bool, bool);
+    using RenderWindowFn = void (*)(Render::IHyprRenderer*, PHLWINDOW, PHLMONITOR, const SP<Workspace::CWorkspacePresentable>&, const Time::steady_tp&, bool, Render::eRenderPassMode, bool, bool);
     using ShouldBlurFn = bool (*)(Render::IHyprRenderer*, PHLWINDOW);
     using SurfaceBoxFn = CBox (*)(CSurfacePassElement*);
     using SurfaceVisibleFn = CRegion (*)(CSurfacePassElement*, bool&);
@@ -474,15 +474,16 @@ struct StageController::Impl {
         }
         reinterpret_cast<SurfaceUVFn>(self->surfaceUVHook->m_original)(renderer, window, std::move(surface), monitor, main, size, logical, misaligned);
     }
-    static void renderWindowThunk(Render::IHyprRenderer* renderer, PHLWINDOW window, PHLMONITOR monitor, const Time::steady_tp& time,
-                                  bool decorate, Render::eRenderPassMode mode, bool ignorePosition, bool standalone) {
+    static void renderWindowThunk(Render::IHyprRenderer* renderer, PHLWINDOW window, PHLMONITOR monitor,
+                                  const SP<Workspace::CWorkspacePresentable>& presentation, const Time::steady_tp& time, bool decorate, Render::eRenderPassMode mode,
+                                  bool ignorePosition, bool standalone) {
         auto* self = instance;
         const auto* screen = self->visualScreenFor(monitor);
         if (!standalone && !ignorePosition && !self->rendering && !renderer->m_bRenderingSnapshot && self->enabled && !self->blocked() && screen && !screen->covered &&
             !monitor->m_activeSpecialWorkspace && (self->flying(*screen, window) ||
                 (self->dragHover && self->dragHover->window == window)))
             return;
-        reinterpret_cast<RenderWindowFn>(self->renderWindowHook->m_original)(renderer, window, monitor, time, decorate, mode, ignorePosition, standalone);
+        reinterpret_cast<RenderWindowFn>(self->renderWindowHook->m_original)(renderer, window, monitor, presentation, time, decorate, mode, ignorePosition, standalone);
     }
     static float roundingThunk(Desktop::View::CWindow* window) {
         auto* self = instance;
@@ -2294,7 +2295,7 @@ void StageController::Impl::drawPreview(const PHLWINDOW& window, const PHLMONITO
         for (const auto& decoration : window->presentation().decorations()) {
             const auto layer = decoration->getDecorationLayer();
             if (below == (layer == DECORATION_LAYER_BOTTOM || layer == DECORATION_LAYER_UNDER))
-                decoration->draw(monitor, 1.F);
+                decoration->draw(monitor, 1.F, nullptr);
         }
         drawingDecoration = false;
         state.renderModif = {};
