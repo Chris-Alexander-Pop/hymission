@@ -378,7 +378,7 @@ class OverviewController {
         Vector2D localPos;
         double   w = 0.0;
         double   h = 0.0;
-        int      rounding = 0;
+        Math::SCornerRadii rounding{};
         bool     dontRound = true;
         float    roundingPower = 2.0F;
         float    alpha = 1.0F;

@@ -517,11 +517,6 @@ std::string getConfigString(HANDLE handle, const char* name, std::string fallbac
     if (*value.type == typeid(Config::STRING))
         return **reinterpret_cast<Config::STRING* const*>(value.dataptr);
 
-    if (*value.type == typeid(Hyprlang::STRING)) {
-        const auto* data = reinterpret_cast<Hyprlang::STRING const*>(value.dataptr);
-        return data && *data ? std::string(*data) : fallback;
-    }
-
     return fallback;
 }
 
@@ -817,7 +812,7 @@ double swipeDistanceForDirection(const ITrackpadGesture::STrackpadGestureUpdate&
 }
 
 bool shouldWrapWorkspaceIds(const WorkspaceKey targetId, const WorkspaceKey currentId) {
-    static auto PWORKSPACEWRAPAROUND = CConfigValue<Hyprlang::INT>("animations:workspace_wraparound");
+    static auto PWORKSPACEWRAPAROUND = CConfigValue<Config::INTEGER>("animations:workspace_wraparound");
 
     if (!*PWORKSPACEWRAPAROUND)
         return false;
@@ -4408,7 +4403,7 @@ void OverviewController::renderOverviewBorderForRect(const PHLWINDOW& window, co
     const double roundingScale = previewDecorationRoundingScale(monitor);
     const double roundingPower = window->presentation().roundingPower();
     const double correctionOffset = borderSizeLogical * (M_SQRT2 - 1.0) * std::max(2.0 - roundingPower, 0.0);
-    const double innerRoundingLogical = std::max(0.0, static_cast<double>(window->presentation().rounding()) * roundingScale * decorationScale);
+    const double innerRoundingLogical = std::max(0.0, static_cast<double>(window->presentation().rounding().max()) * roundingScale * decorationScale);
     const int    innerRounding =
         std::min(static_cast<int>(std::floor(std::min(borderBox.width, borderBox.height) * 0.5)),
                  std::max(0, static_cast<int>(std::lround(innerRoundingLogical * renderScale))));
@@ -4532,7 +4527,7 @@ void OverviewController::renderOverviewShadowForRect(const PHLWINDOW& window, co
     const double roundingPower = window->presentation().roundingPower();
     const double correctionOffset = borderSize * (M_SQRT2 - 1.0) * std::max(2.0 - roundingPower, 0.0);
     const int    shadowRound = std::max(
-        0, static_cast<int>(std::lround((static_cast<double>(window->presentation().rounding()) * roundingScale * decorationScale + borderSize - correctionOffset) * renderScale)));
+        0, static_cast<int>(std::lround((static_cast<double>(window->presentation().rounding().max()) * roundingScale * decorationScale + borderSize - correctionOffset) * renderScale)));
     const int renderRange = std::max(1, static_cast<int>(std::lround(shadowRange * renderScale)));
 
     // Desktop decorations do not disappear as the overview reaches its native
@@ -4556,7 +4551,7 @@ void OverviewController::renderOverviewShadowForRect(const PHLWINDOW& window, co
             cutoutSource.translate(window->presentation().floatingOffset() - monitor->m_position).scale(monitor->m_scale);
             cutoutTarget = toBox(rectToMonitorRenderLocal(previewRect, monitor));
             // Match transformSurfaceRenderDataForWindow, including its size cap.
-            const int surfaceRadius = static_cast<int>(window->presentation().rounding() * monitor->m_scale);
+            const int surfaceRadius = static_cast<int>(window->presentation().rounding().max() * monitor->m_scale);
             const int maxRadius = std::max(0, static_cast<int>(std::floor(std::min(previewRect.width, previewRect.height) * 0.5)));
             cutoutRadius = std::min(maxRadius, std::max(0, static_cast<int>(std::lround(surfaceRadius * roundingScale))));
         }
@@ -7654,7 +7649,7 @@ SDispatchResult OverviewController::startOverviewWorkspaceTransitionForDispatche
             return {.id = previous.id, .name = previous.name.empty() ? std::to_string(previous.id) : previous.name};
         };
 
-        static auto PBACKANDFORTH = CConfigValue<Hyprlang::INT>("binds:workspace_back_and_forth");
+        static auto PBACKANDFORTH = CConfigValue<Config::INTEGER>("binds:workspace_back_and_forth");
         const bool explicitPrevious = args.contains("previous");
         const auto resolved = resolveWorkspaceToChange(args);
         if (resolved.id == WORKSPACE_INVALID)
@@ -9250,11 +9245,10 @@ bool OverviewController::transformSurfaceRenderDataForWindow(const PHLWINDOW& wi
     renderData.localPos = transformedLocalPos;
     renderData.w = std::max(1.0, renderData.w * transform->scaleX);
     renderData.h = std::max(1.0, renderData.h * transform->scaleY);
-    if (!renderData.dontRound && renderData.rounding > 0) {
+    if (!renderData.dontRound && renderData.rounding.isRounded()) {
         const double scale = previewDecorationRoundingScale(monitor);
-        const int    maxRounding = std::max(0, static_cast<int>(std::floor(std::min(renderData.w, renderData.h) * 0.5)));
-        renderData.rounding = std::min(maxRounding, std::max(0, static_cast<int>(std::lround(static_cast<double>(renderData.rounding) * scale))));
-        renderData.dontRound = renderData.rounding <= 0;
+        renderData.rounding = (renderData.rounding * static_cast<float>(scale)).clamped({renderData.w, renderData.h});
+        renderData.dontRound = !renderData.rounding.isRounded();
     }
 
     // Keep overview previews independent from normal-layout monitor clipping.
@@ -13778,7 +13772,7 @@ void OverviewController::renderDraggedWindowPreview() const {
 
     const Rect local = rectToMonitorRenderLocal(preview, renderMonitor);
     const double renderScale = renderScaleForMonitor(renderMonitor);
-    const int rounding = std::max(0, static_cast<int>(std::lround(static_cast<double>(window->presentation().rounding()) * decorationScale * renderScale)));
+    const int rounding = std::max(0, static_cast<int>(std::lround(static_cast<double>(window->presentation().rounding().max()) * decorationScale * renderScale)));
     const float roundingPower = static_cast<float>(window->presentation().roundingPower());
     g_pHyprOpenGL->renderTexture(renderContext(), texture, toBox(local), {.a = static_cast<float>(alpha), .round = rounding, .roundingPower = roundingPower});
 
@@ -14167,7 +14161,7 @@ void OverviewController::renderPreviewOutline(const PHLWINDOW& window, const Rec
     // Follow the preview's own corners: renderWindow draws fullscreen windows square,
     // otherwise the preview keeps the window's unscaled rounding.
     const bool   fullscreen = Fullscreen::controller()->getFullscreenModes(window).internal == Fullscreen::FSMODE_FULLSCREEN;
-    const double rounding = fullscreen ? 0.0 : std::max(0.0, static_cast<double>(window->presentation().rounding()));
+    const double rounding = fullscreen ? 0.0 : std::max(0.0, static_cast<double>(window->presentation().rounding().max()));
     const double roundingPower = fullscreen ? 2.0 : window->presentation().roundingPower();
     const double renderScale = renderScaleForMonitor(renderMonitor);
     // Same outer corner as renderOverviewBorderForRect and Hyprland's border decoration.

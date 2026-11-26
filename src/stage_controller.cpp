@@ -34,6 +34,7 @@
 #include <hyprland/src/config/ConfigManager.hpp>
 #include <hyprland/src/config/ConfigValue.hpp>
 #include <hyprland/src/config/shared/complex/ComplexDataTypes.hpp>
+#include <hyprland/src/config/shared/complex/CornersData.hpp>
 #include <hyprland/src/desktop/state/FocusState.hpp>
 #include <hyprland/src/desktop/state/GlobalWindowController.hpp>
 #include <hyprland/src/desktop/state/WindowState.hpp>
@@ -163,6 +164,12 @@ double numberSetting(const char* key, double fallback, double minimum = 0.0, dou
         return **reinterpret_cast<bool* const*>(value.dataptr) ? 1 : 0;
     if (*value.type == typeid(Config::INTEGER))
         return finiteConfig(**reinterpret_cast<Config::INTEGER* const*>(value.dataptr), fallback, minimum, maximum);
+    if (*value.type == typeid(Config::CCornersData)) {
+        const auto* corners = *reinterpret_cast<const Config::CCornersData* const*>(value.dataptr);
+        if (!corners)
+            return fallback;
+        return finiteConfig(static_cast<double>(std::max({corners->m_topLeft, corners->m_topRight, corners->m_bottomRight, corners->m_bottomLeft})), fallback, minimum, maximum);
+    }
     return fallback;
 }
 
@@ -362,7 +369,7 @@ struct StageController::Impl {
     using WindowFocusFn = void (*)(Desktop::CFocusState*, PHLWINDOW, Desktop::eFocusReason, SP<CWLSurfaceResource>);
     using ScrollFocusFn = void (*)(Layout::Tiled::CScrollingAlgorithm*, SP<Layout::ITarget>, Layout::Tiled::CScrollingAlgorithm::eInputMode);
     using WindowAtFn = PHLWINDOW (*)(const Desktop::CViewHitTester*, const Vector2D&, uint16_t, PHLWINDOW);
-    using RoundingFn = float (*)(Desktop::View::CWindowPresentation*);
+    using RoundingFn = Math::SCornerRadii (*)(Desktop::View::CWindowPresentation*);
     using RenderWindowFn = void (*)(Render::IHyprRenderer*, Render::CRenderContext&, PHLWINDOW, PHLMONITOR, const Render::SWindowRenderPresentation&, const Time::steady_tp&, bool, Render::eRenderPassMode, bool, bool);
     using ShouldBlurFn = bool (*)(const Desktop::View::CWindow*, const Render::SWindowRenderPresentation&);
     using SurfaceBoxFn = CBox (*)(CSurfacePassElement*);
@@ -941,13 +948,13 @@ struct StageController::Impl {
         Hyprutils::Utils::CScopeGuard restore{[&] { renderer->bindFB(renderContext(), destination); }};
         return original(renderer, ctx, alpha, damage, blurContext);
     }
-    static float roundingThunk(Desktop::View::CWindowPresentation* presentation) {
+    static Math::SCornerRadii roundingThunk(Desktop::View::CWindowPresentation* presentation) {
         auto* self = instance;
         // Native decorations query a pre-scale radius; surfaces receive their
         // final displayed radius directly without changing the real window.
         if (self->roundingWindow && &self->roundingWindow->presentation() == presentation)
-            return self->roundingOverride;
-        return self->drawingDecoration ? self->decorationRadius : reinterpret_cast<RoundingFn>(self->roundingHook->m_original)(presentation);
+            return {self->roundingOverride};
+        return self->drawingDecoration ? Math::SCornerRadii{self->decorationRadius} : reinterpret_cast<RoundingFn>(self->roundingHook->m_original)(presentation);
     }
     static PHLWINDOW windowAtThunk(const Desktop::CViewHitTester* tester, const Vector2D& position, uint16_t properties, PHLWINDOW ignore) {
         auto* self = instance;
@@ -2807,7 +2814,7 @@ void StageController::Impl::finishThumbnailDrag() {
         const CBox target = setting("stage_window_decorations", 0) ? window->getFullWindowBoundingBox() :
             CBox{window->positionAnimation()->value(), window->sizeAnimation()->value()};
         screen->flights.push_back({Preview{window, target, target}, from, target,
-            window->presentation().rounding(), window->presentation().rounding()});
+            window->presentation().rounding().max(), window->presentation().rounding().max()});
         screen->flights.back().desktopDecorations = true;
         screen->flightStart = Clock::now();
         screen->flightDuration = std::clamp(setting("stage_transition_ms", 300), 0L, 2000L);
@@ -2882,7 +2889,7 @@ bool StageController::Impl::endDrag(Layout::Supplementary::CDragStateController*
                 grabOffset = pointer - window->positionAnimation()->value();
                 dropOrigin = setting("stage_window_decorations", 0) ? window->getFullWindowBoundingBox() :
                     CBox{window->positionAnimation()->value(), window->sizeAnimation()->value()};
-                dropRadius = window->presentation().rounding();
+                dropRadius = window->presentation().rounding().max();
                 if (dragHover && dragHover->window == window) {
                     const auto frame = dragHoverFrame();
                     dropOrigin = box(frame.window);
@@ -2906,7 +2913,7 @@ bool StageController::Impl::endDrag(Layout::Supplementary::CDragStateController*
             dropPoint=area.middle();
             if (window) {
                 dropOrigin=CBox{window->positionAnimation()->value(),window->sizeAnimation()->value()};
-                dropRadius=window->presentation().rounding();
+                dropRadius=window->presentation().rounding().max();
                 floatingCenter=area.middle();
             }
         }
@@ -3583,7 +3590,7 @@ void StageController::Impl::drawDragHover(const PHLMONITOR& monitor) {
             const auto box = hymission::box(frame.window);
             const auto bounds = dragHover->onDesktop ? rect(CBox{monitor->m_position, monitor->m_size}) : flightBounds(monitor);
             const auto clip = physical(CBox{bounds.x, bounds.y, bounds.width, bounds.height});
-            const double radius = dragHover->onDesktop ? window->presentation().rounding() : stage::previewRounding(numberSetting("plugin:hymission:stage_window_rounding", -1, -1, 4096),
+            const double radius = dragHover->onDesktop ? window->presentation().rounding().max() : stage::previewRounding(numberSetting("plugin:hymission:stage_window_rounding", -1, -1, 4096),
                 numberSetting("decoration:rounding", 0), box.w, box.h);
             if ((TilesController::get() && TilesController::get()->enabled(monitor)) || !dragHover->edgeTransfer)
                 drawPreview(window, monitor, box, clip, radius, std::nullopt, nullptr, dragHover->onDesktop);
@@ -3765,7 +3772,7 @@ void StageController::Impl::startFlights(Screen& screen, WorkspaceKey previous, 
                 miniature(workspace, goal, screen.cards, screen.geometry, screen.scroll, screen.right, window, false);
             if (!from || !to)
                 continue;
-            const auto nativeRadius = window->presentation().rounding();
+            const auto nativeRadius = window->presentation().rounding().max();
             const double fromRadius = old != previousFlights.end() ? old->fromRadius + (old->toRadius - old->fromRadius) * stage::transitionProgress(oldProgress, 1) :
                 workspaceKey(workspace) == previous ? nativeRadius : radius(*from);
             const double toRadius = workspace == activeWorkspace ? nativeRadius : radius(*to);
@@ -4124,12 +4131,12 @@ void StageController::Impl::drawPreview(const PHLWINDOW& window, const PHLMONITO
     data.w = source.w;
     data.h = source.h;
     data.clipBox = clip;
-    data.rounding = static_cast<int>(std::lround(radius * monitor->m_scale)) + 1;
+    data.rounding = Math::SCornerRadii{static_cast<float>(std::lround(radius * monitor->m_scale)) + 1.F};
     data.dontRound = radius <= 0;
     // Export the final surface radius after fitting, clamping and physical
     // pixel quantization, in the logical coordinates used by capture clients.
     if (captureRounding)
-        *captureRounding = data.dontRound ? 0.0 : data.rounding / monitor->m_scale;
+        *captureRounding = data.dontRound ? 0.0 : data.rounding.max() / monitor->m_scale;
     data.roundingPower = window->presentation().roundingPower();
     data.blur = shouldBlur && shouldBlur(window.get(), window->presentation().renderPresentation());
     data.blockBlurOptimization = true;
@@ -4183,7 +4190,7 @@ void StageController::Impl::drawFlights(Screen& screen, const PHLMONITOR& monito
         if (flight.edgeTransfer && viewport && !stage::overviewEndpointVisible({frame, *viewport, viewport->box}))
             continue; // Do not leave a shadow visible during the hidden size change.
         const CBox drawClip = !screen.tile && flight.desktopDecorations ? CBox{0, 0, monitor->m_size.x * monitor->m_scale, monitor->m_size.y * monitor->m_scale} : clip;
-        const double radius = flight.desktopDecorations ? window->presentation().rounding() :
+        const double radius = flight.desktopDecorations ? window->presentation().rounding().max() :
             flight.fromRadius + (flight.toRadius - flight.fromRadius) * stage::transitionProgress(p, 1);
         // Flights use the same output plane as native single-column Stage.
         // Keep the flight's own interpolated scrolling viewport, not tile or
