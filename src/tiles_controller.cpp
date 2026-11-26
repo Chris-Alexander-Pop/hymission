@@ -862,8 +862,9 @@ struct TilesController::Impl {
             return {};
         }
         if (ws->m_monitor != mon) {
-            const auto fn = reinterpret_cast<Action (*)(PHLWORKSPACE)>((current ? typedCurrentHook : typedHook)->m_original);
-            return fn(std::move(ws));
+            if (current)
+                return reinterpret_cast<Action (*)(PHLWORKSPACE)>(typedCurrentHook->m_original)(std::move(ws));
+            return reinterpret_cast<Action (*)(PHLWORKSPACE, bool)>(typedHook->m_original)(std::move(ws), false);
         }
         if (mon->m_activeSpecialWorkspace) {
             static auto hide = CConfigValue<Config::INTEGER>("binds:hide_special_on_workspace_change");
@@ -872,14 +873,23 @@ struct TilesController::Impl {
         }
         // Keep native pointer constraints, workspace_center_on and cursor policy;
         // the monitor boundary below only substitutes tile publication/geometry.
-        return reinterpret_cast<Action (*)(PHLWORKSPACE)>((current?typedCurrentHook:typedHook)->m_original)(ws);
+        if (current)
+            return reinterpret_cast<Action (*)(PHLWORKSPACE)>(typedCurrentHook->m_original)(ws);
+        return reinterpret_cast<Action (*)(PHLWORKSPACE, bool)>(typedHook->m_original)(ws, false);
     }
-    static Action typed(PHLWORKSPACE ws) { return self->route(std::move(ws), false); }
+    static Action typed(PHLWORKSPACE ws, bool noFocus) {
+        if (noFocus)
+            return reinterpret_cast<Action (*)(PHLWORKSPACE, bool)>(typedHook->m_original)(std::move(ws), true);
+        return self->route(std::move(ws), false);
+    }
     static Action typedCurrent(PHLWORKSPACE ws) { return self->route(std::move(ws), true); }
     static Action actionString(const std::string& selector, bool current) {
         auto mon = Desktop::focusState()->monitor();
-        if (!self->active(mon) || locked() || self->applying || (self->overview && self->overview()))
-            return reinterpret_cast<Action (*)(const std::string&)>((current ? stringCurrentHook : stringHook)->m_original)(selector);
+        if (!self->active(mon) || locked() || self->applying || (self->overview && self->overview())) {
+            if (current)
+                return reinterpret_cast<Action (*)(const std::string&)>(stringCurrentHook->m_original)(selector);
+            return reinterpret_cast<Action (*)(const std::string&, bool)>(stringHook->m_original)(selector, false);
+        }
         auto target = State::Workspace::resolver()->getWorkspaceTargetFromString(selector, mon);
         if (!target.valid()) return Config::Actions::actionError("invalid tile workspace selector");
         auto ws = State::workspaceState()->find(target);
@@ -891,7 +901,11 @@ struct TilesController::Impl {
         if (!ws) ws = createWorkspace(target, mon);
         return self->route(std::move(ws), current);
     }
-    static Action stringAction(const std::string& s) { return actionString(s, false); }
+    static Action stringAction(const std::string& s, bool noFocus) {
+        if (noFocus)
+            return reinterpret_cast<Action (*)(const std::string&, bool)>(stringHook->m_original)(s, true);
+        return actionString(s, false);
+    }
     static Action stringCurrent(const std::string& s) { return actionString(s, true); }
     std::vector<WorkspaceKey> owned(Output& o, tiles::Id id) const {
         std::vector<WorkspaceKey> named, numbered;
